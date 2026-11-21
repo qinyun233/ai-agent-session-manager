@@ -356,19 +356,32 @@ function sessionCell(s, key) {
   }
 }
 
+function colorTime(text, ms) {
+  const age = Date.now() - ms;
+  if (age < 3_600_000) return `\x1b[32m${text}\x1b[0m`;
+  if (age < 86_400_000) return `\x1b[33m${text}\x1b[0m`;
+  return dim(text);
+}
+
 function renderHeader(cells, sort) {
   const parts = cells.map((c) => {
-    const marker = sort.mode === c.key ? (sort.order === 'asc' ? ' ↑' : ' ↓') : '';
+    const active = sort.mode === c.key;
+    const marker = active ? (sort.order === 'asc' ? ' ↑' : ' ↓') : '';
     const text = padEndW(truncate(c.label + marker, c.width), c.width);
-    return (sort.mode === c.key ? '\x1b[1m\x1b[4m' : '\x1b[4m') + text + '\x1b[0m';
+    return active ? `\x1b[1m\x1b[36m${text}\x1b[0m` : `\x1b[1m${text}\x1b[0m`;
   });
   return ' '.repeat(LEFT) + parts.join(' '.repeat(GAP));
 }
 
 function renderRow(cells, s, selected, width) {
   const parts = cells.map((c) => {
-    const padded = padEndW(truncate(sessionCell(s, c.key), c.width), c.width);
-    return c.key === 'name' || selected ? padded : dim(padded);
+    const raw = sessionCell(s, c.key);
+    const shown = truncate(raw, c.width);
+    const pad = ' '.repeat(Math.max(0, c.width - strWidth(shown)));
+    if (selected) return shown + pad;
+    if (c.key === 'name') return `\x1b[36m${shown}\x1b[0m${pad}`;
+    if (c.key === 'time') return colorTime(shown, s.mtimeMs) + pad;
+    return dim(shown) + pad;
   });
   const used = LEFT + cells.reduce((n, c) => n + c.width, 0) + GAP * (cells.length - 1);
   const line = ' '.repeat(LEFT) + parts.join(' '.repeat(GAP)) + ' '.repeat(Math.max(0, width - used));
@@ -602,13 +615,20 @@ function runTui(cfg, initialSessions, initialSort) {
       if (cursor >= top + viewH) top = cursor - viewH + 1;
       top = Math.max(0, Math.min(top, Math.max(0, filtered.length - viewH)));
 
-      const qMax = Math.max(4, width - 16);
+      const qMax = Math.max(4, width - 20);
       const qShown = strWidth(query) > qMax ? '…' + [...query].slice(-(qMax - 1)).join('') : query;
-      const searchLine = truncate(` 筛选: ${qShown}`, Math.max(4, width - 12));
+
+      const title = truncate(`Claude 会话 (${sessions.length})`, width);
+      const meta = `   排序: ${sortLabel(sort)}   ${cfg.projectsDir}`;
+      const metaRoom = width - strWidth(title);
+      const titleLine = `\x1b[1m\x1b[36m${title}\x1b[0m` + (metaRoom > 6 ? dim(truncate(meta, metaRoom)) : '');
+
+      const searchLine = dim(' 筛选: ') + `\x1b[1m${truncate(qShown, Math.max(1, width - 14))}\x1b[0m`
+        + '\x1b[7m \x1b[0m' + dim(`  (${filtered.length} 条)`);
 
       const lines = [];
-      lines.push(dim(truncate(` Claude 会话 (${sessions.length})   排序: ${sortLabel(sort)}   ${cfg.projectsDir}`, width)));
-      lines.push(searchLine + '\x1b[7m \x1b[0m' + dim(`  (${filtered.length} 条)`));
+      lines.push(titleLine);
+      lines.push(searchLine);
       lines.push(renderHeader(layout.cells, sort));
       lines.push(dim(' ' + '─'.repeat(Math.max(0, width - 1))));
       for (let i = 0; i < viewH; i++) {
