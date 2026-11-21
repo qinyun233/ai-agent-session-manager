@@ -1,9 +1,9 @@
 {
-  "name": "claude-session-manager",
+  "name": "ai-agent-seesion-manager",
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "TUI to browse and resume Claude Code sessions",
+  "description": "Node.js TUI for managing AI agent sessions (Claude Code on Windows)",
   "bin": {
     "claude-sessions": "src/index.js"
   },

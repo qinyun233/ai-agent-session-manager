@@ -1,6 +1,8 @@
-# Claude Session Manager
+# ai-agent-seesion-manager
 
-列出本机所有 Claude Code 会话，选一个直接 `claude --resume` 继续。纯 Node 实现，无第三方依赖。
+使用 Node.js 实现的终端 TUI，用于管理 AI Agent 的会话记录：列出本机已有的会话，选中后直接恢复继续。
+
+目前只实现了 Windows 下 Claude Code 的会话管理，其他 agent（如 Codex）尚未接入。
 
 ![界面预览](pic/效果.jpg)
 
@@ -27,15 +29,6 @@ npm start
 - 单击选中，双击或 Enter 打开会话；会话结束后自动回到列表
 - 滚轮滚动，↑↓ 移动，输入关键字按项目名、路径、会话 id 过滤，Esc 退出
 
-不进入交互界面时：
-
-```powershell
-npm run list                              # 纯文本表格
-node src/index.js --json                  # JSON，便于脚本处理
-node src/index.js --open dd1da7b4         # 按 id 前缀直接打开
-node src/index.js --sort name --order asc # 指定排序
-```
-
 ## 配置
 
 配置文件为项目根目录的 `config.json`，也可用 `--config <path>` 或环境变量 `CLAUDE_SESSION_MANAGER_CONFIG` 指定。
@@ -48,10 +41,14 @@ node src/index.js --sort name --order asc # 指定排序
 | `sort` | 初始排序：`time` / `name` / `path` / `id` | `time` |
 | `order` | 排序方向：`asc` / `desc` | 时间 `desc`，其余 `asc` |
 
-命令模板另支持 `{cwd}`、`{projectDir}`、`{projectName}` 占位符，路径类会自动加引号。命令会在会话的工作目录下执行，因此换成其他 agent（例如 Codex）只需改这一项。
+命令模板另支持 `{cwd}`、`{projectDir}`、`{projectName}` 占位符，路径类会自动加引号。命令会在会话的工作目录下执行，因此换成其他 agent 只需改这一项。
 
-## 说明
+## 工作流程
 
-- 会话 id 就是 `~/.claude/projects/<项目>/<uuid>.jsonl` 的文件名。
-- 项目文件夹名是路径的有损编码（中文、下划线、分隔符都会变成 `-`），无法还原，所以工作目录取自会话文件里第一个 `cwd` 字段，只读到该字段就停止。
-- 存活判断会确认 PID 存在且进程名是 claude，避免 PID 被复用导致误报。
+1. 启动时读取 `config.json`，确定会话目录、状态目录和恢复命令。
+2. 扫描 `projectsDir`：每个 `<uuid>.jsonl` 文件就是一个会话，文件名即会话 id，同时记录文件修改时间。
+3. 逐个打开会话文件，只读到第一个 `cwd` 字段就停止，得到会话的真实工作目录（项目文件夹名是有损编码，无法反推路径）。
+4. 读取 `sessionsDir` 下按 PID 命名的状态文件，确认 PID 存在、且进程名是 claude，标记该会话为运行中。
+5. 按配置排序并渲染列表，支持输入关键字实时过滤；界面每 2 秒刷新一次存活状态。
+6. 选中会话后退出 TUI，在该会话的工作目录下执行 `command`（默认 `claude --resume <会话id>`），把终端交给 claude。
+7. claude 退出后重新扫描目录，回到列表，可以继续选择下一个会话。
