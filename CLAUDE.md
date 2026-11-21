@@ -39,5 +39,8 @@ node src/index.js --sort time --order asc
 - 存活判断：读 `sessionsDir` 下的 `<pid>.json`，先用 `process.kill(pid, 0)` 确认 PID 存在，再用 `tasklist` 确认该 PID 的进程名包含 `claude`（防止 PID 被复用时误判）；非 Windows 或 `tasklist` 失败时退化为只查 PID。
 - 项目文件夹名是有损编码，`:` `\` `_` `-` 和中文都变成 `-`，不能反推真实路径；因此只读 jsonl 的第一个 `cwd` 字段，找到即停止，不读标题和正文。
 - 界面是自己用 ANSI 转义序列画的（`src/index.js` 的 `runTui`），没有用 inquirer 等库，因为那些库不支持鼠标点击。
+- 终端能力检测在 `detectCapabilities`：stdin/stdout 都是 TTY 才进交互界面；Windows 上默认认为支持 ANSI；鼠标只按环境变量启发式判断（WT_SESSION、TERM_PROGRAM、ConEmuANSI、TERM 等），可用 `--mouse` / `--no-mouse` 覆盖。
+- `isTTY` 为假时直接输出纯文本列表；`--plain` 或 `TERM=dumb` 时走 `runPlain` 逐行交互，不进入备用屏、不启用原始模式和鼠标。
+- `NO_COLOR` 只关颜色，TUI 仍在；此时选中行用行首 `>` 标记。
 - 会话结束后会重新扫描并回到列表。
 - `--list` / `--json` / `--open` 不进入交互界面，可用于脚本或管道。

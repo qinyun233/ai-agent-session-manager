@@ -7,6 +7,7 @@ import { spawn, execFile } from 'node:child_process';
 import { StringDecoder } from 'node:string_decoder';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
+import { createInterface } from 'node:readline/promises';
 
 const execFileAsync = promisify(execFile);
 
@@ -32,12 +33,15 @@ const GAP = 2;
 const LIST_START = 4;
 
 function parseArgs(argv) {
-  const args = { list: false, json: false, help: false, config: null, open: null, sort: null, order: null };
+  const args = { list: false, json: false, help: false, config: null, open: null, sort: null, order: null, plain: false, mouse: null };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === '--list') args.list = true;
     else if (a === '--json') args.json = true;
     else if (a === '--help' || a === '-h') args.help = true;
+    else if (a === '--plain') args.plain = true;
+    else if (a === '--mouse') args.mouse = true;
+    else if (a === '--no-mouse') args.mouse = false;
     else if (a === '--sort') args.sort = argv[++i] ?? null;
     else if (a.startsWith('--sort=')) args.sort = a.slice('--sort='.length);
     else if (a === '--order') args.order = argv[++i] ?? null;
@@ -318,8 +322,10 @@ function padEndW(s, width) {
   return s + ' '.repeat(Math.max(0, width - strWidth(s)));
 }
 
+let COLORS = true;
+
 function dim(s) {
-  return `\x1b[2m${s}\x1b[0m`;
+  return COLORS ? `\x1b[2m${s}\x1b[0m` : s;
 }
 
 function relTime(ms) {
@@ -383,6 +389,99 @@ function printPlain(sessions) {
   }
 }
 
+// 识别终端能力：是否交互、是否支持 ANSI、是否能接收鼠标事件
+function detectCapabilities(args) {
+  const env = process.env;
+  const tty = Boolean(process.stdin.isTTY && process.stdout.isTTY);
+  const term = String(env.TERM || '');
+  let ansi = tty && term !== 'dumb';
+  if (process.platform === 'win32' && tty) ansi = true;
+  const color = ansi && !env.NO_COLOR;
+
+  let mouse = false;
+  if (tty) {
+    if (process.platform === 'win32') {
+      mouse = Boolean(env.WT_SESSION)
+        || env.TERM_PROGRAM === 'vscode'
+        || env.TERM_PROGRAM === 'WezTerm'
+        || env.ConEmuANSI === 'ON'
+        || Boolean(env.ANSICON)
+        || /xterm|256color/i.test(term);
+    } else {
+      mouse = /xterm|screen|tmux|rxvt|alacritty|kitty|wezterm/i.test(term) || Boolean(env.TERM_PROGRAM);
+    }
+  }
+  if (args.mouse != null) mouse = args.mouse && tty;
+  return { tty, ansi, color, mouse };
+}
+
+function printInteractiveList(rows, sort, caps) {
+  const dot = (alive) => {
+    if (!caps.color) return alive ? '*' : '-';
+    return alive ? '\x1b[32m●\x1b[0m' : '\x1b[31m●\x1b[0m';
+  };
+  console.log(`\n${'-'.repeat(60)} 排序: ${sortLabel(sort)}  共 ${rows.length} 条`);
+  if (!rows.length) {
+    console.log('  (无匹配会话)');
+    return;
+  }
+  rows.forEach((s, i) => {
+    console.log(`${String(i + 1).padStart(3)}. ${dot(s.alive)} ${s.projectName}  ${s.cwd ?? '(cwd 未知)'}  ${relTime(s.mtimeMs)}  ${s.id.slice(0, 8)}`);
+  });
+}
+
+// 普通终端回退：逐行交互，不需要全屏、原始模式和鼠标
+async function runPlain(cfg, initialSessions, initialSort, caps) {
+  const rl = createInterface({ input: process.stdin, output: process.stdout });
+  let sessions = initialSessions;
+  let sort = initialSort;
+  let query = '';
+
+  while (true) {
+    const rows = filterSessions(sortSessions(sessions, sort), query);
+    printInteractiveList(rows, sort, caps);
+    let answer;
+    try {
+      answer = await rl.question(`[${sortLabel(sort)}] 编号打开 / 关键字过滤 / :sort time|name|path|id / :all 清空 / q 退出 > `);
+    } catch {
+      break;
+    }
+    const text = String(answer ?? '').trim();
+    if (!text) continue;
+    if (text === 'q' || text === 'quit' || text === 'exit') break;
+    if (text === ':all') {
+      query = '';
+      continue;
+    }
+    if (text.startsWith(':sort')) {
+      try {
+        sort = normalizeSort(text.split(/\s+/)[1]);
+        query = '';
+      } catch (err) {
+        console.log(err.message);
+      }
+      continue;
+    }
+    if (/^\d+$/.test(text)) {
+      const idx = Number(text) - 1;
+      if (idx < 0 || idx >= rows.length) {
+        console.log('编号超出范围');
+        continue;
+      }
+      await launch(cfg, rows[idx]);
+      try {
+        sessions = await scanSessions(cfg.projectsDir);
+        await applyAliveStatus(sessions, cfg.sessionsDir);
+      } catch (err) {
+        console.error(err.message ?? err);
+      }
+      continue;
+    }
+    query = text;
+  }
+  rl.close();
+}
+
 function printHelp() {
   console.log(`用法: node src/index.js [选项]
 
@@ -392,6 +491,9 @@ function printHelp() {
   --open <id前缀>    直接进入指定会话，不显示列表
   --sort <mode>      排序方式: time | name | path | id（默认 time）
   --order <dir>      排序方向: asc | desc（time 默认 desc，其余 asc）
+  --plain            强制使用逐行交互模式（不支持全屏的终端）
+  --mouse            强制启用鼠标支持
+  --no-mouse         强制关闭鼠标支持
   --config <path>    指定配置文件（默认 ./config.json）
   -h, --help         显示帮助
 
@@ -403,10 +505,17 @@ function printHelp() {
   order        排序方向: asc | desc
 
 交互界面:
-  点击表头      按该列排序，再次点击切换正序/倒序
+  点击表头      按该列排序，再次点击切换正序/倒序（终端支持鼠标时）
+  Tab           按 项目 → 路径 → 时间 → 会话 循环切换排序
+  Ctrl+R        切换正序/倒序
   ↑↓ / 滚轮     移动 / 滚动
   Enter / 双击  打开所选会话
   Esc          退出
+
+终端适配:
+  自动检测终端是否支持 ANSI 和鼠标；不支持 ANSI 或加了 --plain 时
+  自动改用逐行交互模式，普通 cmd/PowerShell 也能使用。
+  非交互环境（管道）会直接输出列表。
 
 环境变量:
   CLAUDE_SESSION_MANAGER_CONFIG  配置文件的替代路径`);
@@ -442,7 +551,7 @@ const SELECTED_BG = '\x1b[48;5;240m';
 
 // 只复位前景色/亮度，保留选中行背景色
 function fg(code, text) {
-  return `\x1b[${code}m${text}${RESET_FG}`;
+  return COLORS ? `\x1b[${code}m${text}${RESET_FG}` : text;
 }
 
 function timeColor(ms) {
@@ -457,6 +566,7 @@ function renderHeader(cells, sort) {
     const active = sort.mode === c.key;
     const marker = active ? (sort.order === 'asc' ? ' ↑' : ' ↓') : '';
     const text = padEndW(truncate(c.label + marker, c.width), c.width);
+    if (!COLORS) return text;
     return active ? `\x1b[1m\x1b[36m${text}\x1b[0m` : `\x1b[1m${text}\x1b[0m`;
   });
   return ' '.repeat(LEFT) + parts.join(' '.repeat(GAP));
@@ -476,11 +586,12 @@ function renderRow(cells, s, selected, width) {
     return fg(2, shown) + pad;
   });
   const used = LEFT + cells.reduce((n, c) => n + c.width, 0) + GAP * (cells.length - 1);
-  const line = ' '.repeat(LEFT) + parts.join(' '.repeat(GAP)) + ' '.repeat(Math.max(0, width - used));
-  return selected ? SELECTED_BG + line + '\x1b[0m' : line;
+  const lead = COLORS ? ' '.repeat(LEFT) : (selected ? '>' : ' ');
+  const line = lead + parts.join(' '.repeat(GAP)) + ' '.repeat(Math.max(0, width - used));
+  return selected && COLORS ? SELECTED_BG + line + '\x1b[0m' : line;
 }
 
-function runTui(cfg, initialSessions, initialSort) {
+function runTui(cfg, initialSessions, initialSort, caps) {
   return new Promise((resolve) => {
     let sessions = initialSessions;
     let sort = initialSort;
@@ -501,8 +612,8 @@ function runTui(cfg, initialSessions, initialSort) {
     let pending = '';
     let escTimer = null;
 
-    const enableScreen = () => process.stdout.write('\x1b[?1049h\x1b[?25l\x1b[?1000h\x1b[?1006h');
-    const disableScreen = () => process.stdout.write('\x1b[?1000l\x1b[?1006l\x1b[?25h\x1b[?1049l');
+    const enableScreen = () => process.stdout.write('\x1b[?1049h\x1b[?25l' + (caps.mouse ? '\x1b[?1000h\x1b[?1006h' : ''));
+    const disableScreen = () => process.stdout.write((caps.mouse ? '\x1b[?1000l\x1b[?1006l' : '') + '\x1b[?25h\x1b[?1049l');
 
     function attach() {
       attached = true;
@@ -620,6 +731,16 @@ function runTui(cfg, initialSessions, initialSort) {
           handleKey('clear');
           continue;
         }
+        if (ch === '\t') {
+          pending = pending.slice(1);
+          handleKey('tab');
+          continue;
+        }
+        if (ch === '\x12') {
+          pending = pending.slice(1);
+          handleKey('ctrl-r');
+          continue;
+        }
         const cp = String.fromCodePoint(pending.codePointAt(0));
         pending = pending.slice(cp.length);
         handleKey(cp);
@@ -655,16 +776,20 @@ function runTui(cfg, initialSessions, initialSort) {
       }
     }
 
-    function clickHeader(key) {
-      sort = sort.mode === key
-        ? { mode: key, order: sort.order === 'asc' ? 'desc' : 'asc' }
-        : normalizeSort(key);
+    function setSort(next) {
+      sort = next;
       sorted = sortSessions(sessions, sort);
       filtered = filterSessions(sorted, query);
       cursor = 0;
       top = 0;
       lastClick = { index: -1, at: 0 };
       render();
+    }
+
+    function clickHeader(key) {
+      setSort(sort.mode === key
+        ? { mode: key, order: sort.order === 'asc' ? 'desc' : 'asc' }
+        : normalizeSort(key));
     }
 
     function move(delta) {
@@ -684,6 +809,14 @@ function runTui(cfg, initialSessions, initialSort) {
         case 'end': cursor = Math.max(0, filtered.length - 1); render(); break;
         case 'enter': open(filtered[cursor]); break;
         case 'escape': quit(); break;
+        case 'tab': {
+          const next = SORT_MODES[(SORT_MODES.indexOf(sort.mode) + 1) % SORT_MODES.length];
+          setSort(normalizeSort(next));
+          break;
+        }
+        case 'ctrl-r':
+          setSort({ mode: sort.mode, order: sort.order === 'asc' ? 'desc' : 'asc' });
+          break;
         case 'clear':
           if (query) {
             query = '';
@@ -730,10 +863,11 @@ function runTui(cfg, initialSessions, initialSort) {
       const title = truncate(`Claude 会话 (${sessions.length})`, width);
       const meta = `   排序: ${sortLabel(sort)}   ${cfg.projectsDir}`;
       const metaRoom = width - strWidth(title);
-      const titleLine = `\x1b[1m\x1b[36m${title}\x1b[0m` + (metaRoom > 6 ? dim(truncate(meta, metaRoom)) : '');
+      const titleLine = (COLORS ? `\x1b[1m\x1b[36m${title}\x1b[0m` : title)
+        + (metaRoom > 6 ? dim(truncate(meta, metaRoom)) : '');
 
-      const searchLine = dim(' 筛选: ') + `\x1b[1m${truncate(qShown, Math.max(1, width - 14))}\x1b[0m`
-        + '\x1b[7m \x1b[0m' + dim(`  (${filtered.length} 条)`);
+      const searchLine = dim(' 筛选: ') + (COLORS ? `\x1b[1m${truncate(qShown, Math.max(1, width - 14))}\x1b[0m` : truncate(qShown, Math.max(1, width - 14)))
+        + (COLORS ? '\x1b[7m \x1b[0m' : '_') + dim(`  (${filtered.length} 条)`);
 
       const lines = [];
       lines.push(titleLine);
@@ -744,8 +878,11 @@ function runTui(cfg, initialSessions, initialSort) {
         const idx = top + i;
         lines.push(idx < filtered.length ? renderRow(layout.cells, filtered[idx], idx === cursor, width) : '');
       }
-      lines.push(dim(truncate(' ↑↓ 移动  Enter/双击 打开  表头排序  Esc 退出  ', Math.max(0, width - 20)))
-        + `\x1b[32m●\x1b[0m` + dim(' 运行中  ') + `\x1b[31m●\x1b[0m` + dim(' 已结束'));
+      const sortHint = caps.mouse ? '点击表头排序  Tab 切换排序' : 'Tab 切换排序  Ctrl+R 正逆序';
+      const hints = ` ↑↓ 移动  Enter 打开  ${sortHint}  Esc 退出  `;
+      lines.push(dim(truncate(hints, Math.max(0, width - 20)))
+        + (COLORS ? '\x1b[32m●\x1b[0m' : '*') + dim(' 运行中  ')
+        + (COLORS ? '\x1b[31m●\x1b[0m' : '-') + dim(' 已结束'));
 
       process.stdout.write('\x1b[H' + lines.map((l) => l + '\x1b[K').join('\r\n') + '\x1b[J');
     }
@@ -811,10 +948,18 @@ async function main() {
     process.exitCode = await launch(cfg, hits[0]);
     return;
   }
-  if (!process.stdin.isTTY || !process.stdout.isTTY) {
-    throw new Error('交互界面需要真实终端；非交互环境请用 --list 或 --json');
+  const caps = detectCapabilities(args);
+  if (!caps.tty) {
+    printPlain(sessions);
+    console.log('\n当前不是交互终端，已输出列表。恢复会话请用: node src/index.js --open <会话id前缀>');
+    return;
   }
-  await runTui(cfg, sessions, initialSort);
+  if (args.plain || !caps.ansi) {
+    await runPlain(cfg, sessions, initialSort, caps);
+    return;
+  }
+  COLORS = caps.color;
+  await runTui(cfg, sessions, initialSort, caps);
 }
 
 main().catch((err) => {
