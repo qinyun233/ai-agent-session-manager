@@ -1,5 +1,6 @@
 {
   "projectsDir": "~/.claude/projects",
+  "sessionsDir": "~/.claude/sessions",
   "command": "claude --resume {sessionId}",
   "sort": "time",
   "order": "desc"

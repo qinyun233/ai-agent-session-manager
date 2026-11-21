@@ -11,6 +11,7 @@ const ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 
 const DEFAULT_CONFIG = {
   projectsDir: '~/.claude/projects',
+  sessionsDir: '~/.claude/sessions',
   command: 'claude --resume {sessionId}',
   sort: 'time',
   order: null,
@@ -67,6 +68,7 @@ async function loadConfig(configPath) {
   const cfg = { ...DEFAULT_CONFIG, ...user };
   const base = path.dirname(path.resolve(file));
   cfg.projectsDir = path.resolve(base, expandHome(String(cfg.projectsDir)));
+  cfg.sessionsDir = path.resolve(base, expandHome(String(cfg.sessionsDir ?? DEFAULT_CONFIG.sessionsDir)));
   if (!String(cfg.command).includes('{sessionId}')) {
     throw new Error('config.command 缺少 {sessionId} 占位符，无法继续会话');
   }
@@ -143,6 +145,50 @@ async function readSessionCwd(file) {
   } finally {
     await handle?.close();
   }
+}
+
+// sessions 目录下是 <pid>.json 状态文件，进程还在就视为存活
+function isPidAlive(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    return err.code === 'EPERM';
+  }
+}
+
+async function readAliveSessionIds(sessionsDir) {
+  const ids = new Set();
+  let names;
+  try {
+    names = await fsp.readdir(sessionsDir);
+  } catch {
+    return ids;
+  }
+  await Promise.all(
+    names.filter((n) => n.endsWith('.json')).map(async (n) => {
+      try {
+        const data = JSON.parse(await fsp.readFile(path.join(sessionsDir, n), 'utf8'));
+        if (data && typeof data.pid === 'number' && data.sessionId && isPidAlive(data.pid)) {
+          ids.add(String(data.sessionId).toLowerCase());
+        }
+      } catch {
+        // 单个状态文件损坏就跳过
+      }
+    }),
+  );
+  return ids;
+}
+
+async function applyAliveStatus(sessions, sessionsDir) {
+  const ids = await readAliveSessionIds(sessionsDir);
+  let changed = false;
+  for (const s of sessions) {
+    const alive = ids.has(s.id.toLowerCase());
+    if (s.alive !== alive) changed = true;
+    s.alive = alive;
+  }
+  return changed;
 }
 
 async function mapLimit(items, limit, fn) {
@@ -297,9 +343,9 @@ function launch(cfg, session) {
 }
 
 function printPlain(sessions) {
-  console.log(['项目', '工作目录', '更新时间', '会话ID'].join('\t'));
+  console.log(['项目', '状态', '工作目录', '更新时间', '会话ID'].join('\t'));
   for (const s of sessions) {
-    console.log([s.projectName, s.cwd ?? '(未知)', new Date(s.mtimeMs).toLocaleString(), s.id].join('\t'));
+    console.log([s.projectName, s.alive ? '存活' : '未运行', s.cwd ?? '(未知)', new Date(s.mtimeMs).toLocaleString(), s.id].join('\t'));
   }
 }
 
@@ -317,6 +363,7 @@ function printHelp() {
 
 配置项 (config.json):
   projectsDir  Claude projects 目录，支持 ~，默认 ~/.claude/projects
+  sessionsDir  运行中会话的状态目录，支持 ~，默认 ~/.claude/sessions
   command      继续会话的命令模板，占位符: {sessionId} {cwd} {projectDir} {projectName}
   sort         排序方式: time | name | path | id
   order        排序方向: asc | desc
@@ -376,10 +423,16 @@ function renderHeader(cells, sort) {
 function renderRow(cells, s, selected, width) {
   const parts = cells.map((c) => {
     const raw = sessionCell(s, c.key);
+    if (c.key === 'name') {
+      const label = truncate(raw, Math.max(1, c.width - 2));
+      const pad = ' '.repeat(Math.max(0, c.width - strWidth(label) - 2));
+      if (selected) return `${label} ●${pad}`;
+      const dot = s.alive ? '\x1b[32m●\x1b[0m' : '\x1b[31m●\x1b[0m';
+      return `\x1b[36m${label}\x1b[0m ${dot}${pad}`;
+    }
     const shown = truncate(raw, c.width);
     const pad = ' '.repeat(Math.max(0, c.width - strWidth(shown)));
     if (selected) return shown + pad;
-    if (c.key === 'name') return `\x1b[36m${shown}\x1b[0m${pad}`;
     if (c.key === 'time') return colorTime(shown, s.mtimeMs) + pad;
     return dim(shown) + pad;
   });
@@ -401,6 +454,9 @@ function runTui(cfg, initialSessions, initialSort) {
     let layout = computeLayout(100);
     let busy = false;
     let ended = false;
+    let attached = false;
+    let aliveRefreshing = false;
+    let aliveTimer = null;
     let lastClick = { index: -1, at: 0 };
     const decoder = new StringDecoder('utf8');
     let pending = '';
@@ -410,6 +466,7 @@ function runTui(cfg, initialSessions, initialSort) {
     const disableScreen = () => process.stdout.write('\x1b[?1000l\x1b[?1006l\x1b[?25h\x1b[?1049l');
 
     function attach() {
+      attached = true;
       enableScreen();
       process.stdout.on('resize', onResize);
       process.stdin.setRawMode(true);
@@ -419,6 +476,7 @@ function runTui(cfg, initialSessions, initialSort) {
     }
 
     function detach() {
+      attached = false;
       process.stdin.removeListener('data', onData);
       process.stdout.removeListener('resize', onResize);
       try {
@@ -434,8 +492,20 @@ function runTui(cfg, initialSessions, initialSort) {
       if (ended) return;
       ended = true;
       if (escTimer) clearTimeout(escTimer);
+      clearInterval(aliveTimer);
       detach();
       resolve();
+    }
+
+    async function refreshAlive() {
+      if (ended || aliveRefreshing) return;
+      aliveRefreshing = true;
+      try {
+        const changed = await applyAliveStatus(sessions, cfg.sessionsDir);
+        if (changed && attached && !ended) render();
+      } finally {
+        aliveRefreshing = false;
+      }
     }
 
     function onResize() {
@@ -635,7 +705,8 @@ function runTui(cfg, initialSessions, initialSort) {
         const idx = top + i;
         lines.push(idx < filtered.length ? renderRow(layout.cells, filtered[idx], idx === cursor, width) : '');
       }
-      lines.push(dim(truncate(' ↑↓ 移动  Enter/双击 打开  点击表头排序  滚轮滚动  Esc 退出', width)));
+      lines.push(dim(truncate(' ↑↓ 移动  Enter/双击 打开  表头排序  Esc 退出  ', Math.max(0, width - 20)))
+        + `\x1b[32m●\x1b[0m` + dim(' 运行中  ') + `\x1b[31m●\x1b[0m` + dim(' 已结束'));
 
       process.stdout.write('\x1b[H' + lines.map((l) => l + '\x1b[K').join('\r\n') + '\x1b[J');
     }
@@ -648,6 +719,7 @@ function runTui(cfg, initialSessions, initialSort) {
       console.log(dim('正在刷新会话列表…'));
       try {
         sessions = await scanSessions(cfg.projectsDir);
+        await applyAliveStatus(sessions, cfg.sessionsDir);
         sorted = sortSessions(sessions, sort);
       } catch (err) {
         console.error(err.message ?? err);
@@ -658,6 +730,8 @@ function runTui(cfg, initialSessions, initialSort) {
       attach();
     }
 
+    aliveTimer = setInterval(refreshAlive, 2000);
+    aliveTimer.unref?.();
     attach();
   });
 }
@@ -674,6 +748,10 @@ async function main() {
     args.order ?? (args.sort ? undefined : cfg.order),
   );
   const sessions = sortSessions(await scanSessions(cfg.projectsDir), initialSort);
+  if (!fs.existsSync(cfg.sessionsDir)) {
+    console.warn(`未找到 sessions 目录 ${cfg.sessionsDir}，存活状态将全部显示为已结束`);
+  }
+  await applyAliveStatus(sessions, cfg.sessionsDir);
   if (!sessions.length) {
     console.log(`未在 ${cfg.projectsDir} 找到任何会话`);
     return;
@@ -683,7 +761,7 @@ async function main() {
     return;
   }
   if (args.json) {
-    console.log(JSON.stringify(sessions.map(({ id, cwd, projectName, mtimeMs, file }) => ({ id, cwd, projectName, mtimeMs, file })), null, 2));
+    console.log(JSON.stringify(sessions.map(({ id, cwd, projectName, mtimeMs, file, alive }) => ({ id, alive: Boolean(alive), cwd, projectName, mtimeMs, file })), null, 2));
     return;
   }
   if (args.open) {

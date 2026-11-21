@@ -15,6 +15,7 @@ node src/index.js --sort time --order asc
 
 交互界面操作：
 
+- 项目名后的圆点：绿色 = 会话进程仍在运行，红色 = 已结束（每 2 秒刷新）
 - 点击表头：按该列排序，再点一次切换正序/倒序
 - ↑↓ / 滚轮：移动、滚动
 - Enter / 双击行：打开会话
@@ -25,6 +26,7 @@ node src/index.js --sort time --order asc
 ## 配置（config.json）
 
 - `projectsDir`：会话目录，支持 `~`，默认 `~/.claude/projects`
+- `sessionsDir`：运行中会话的状态目录，支持 `~`，默认 `~/.claude/sessions`
 - `command`：恢复命令模板，必须含 `{sessionId}`；另支持 `{cwd}` `{projectDir}` `{projectName}`（路径类占位符会自动加引号）
 - `sort`：`time` | `name` | `path` | `id`，默认 `time`
 - `order`：`asc` | `desc`；默认 time 为 desc，其余 asc
@@ -34,6 +36,7 @@ node src/index.js --sort time --order asc
 ## 实现要点
 
 - 一个 `<uuid>.jsonl` 即一个会话，文件名就是会话 id。
+- 存活判断：读 `sessionsDir` 下的 `<pid>.json`，用 `process.kill(pid, 0)` 检查进程是否存在。PID 被系统复用时可能误判为存活，属已知局限。
 - 项目文件夹名是有损编码，`:` `\` `_` `-` 和中文都变成 `-`，不能反推真实路径；因此只读 jsonl 的第一个 `cwd` 字段，找到即停止，不读标题和正文。
 - 界面是自己用 ANSI 转义序列画的（`src/index.js` 的 `runTui`），没有用 inquirer 等库，因为那些库不支持鼠标点击。
 - 会话结束后会重新扫描并回到列表。
