@@ -1,0 +1,14 @@
+{
+  "name": "claude-session-manager",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "TUI to browse and resume Claude Code sessions",
+  "bin": {
+    "claude-sessions": "src/index.js"
+  },
+  "scripts": {
+    "start": "node src/index.js",
+    "list": "node src/index.js --list"
+  }
+}
