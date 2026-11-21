@@ -1,6 +1,6 @@
 {
   "name": "ai-agent-session-manager",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Node.js TUI for managing AI agent sessions (Claude Code on Windows)",
   "type": "module",
   "bin": {
