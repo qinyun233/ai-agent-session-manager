@@ -1,10 +1,10 @@
-# ai-agent-seesion-manager
+# ai-agent-session-manager
 
 使用 Node.js 实现的终端 TUI，用于管理 AI Agent 的会话记录：列出本机已有的会话，选中后直接恢复继续。
 
 目前只实现了 Windows 下 Claude Code 的会话管理，其他 agent（如 Codex）尚未接入。
 
-![界面预览](pic/效果.jpg)
+![界面预览](https://raw.githubusercontent.com/qinyun233/ai-agent-session-manager/master/pic/%E6%95%88%E6%9E%9C.jpg)
 
 ## 环境
 
@@ -12,11 +12,19 @@
 - Windows 10/11 + Windows Terminal（鼠标点击需要终端支持 SGR 鼠标协议，旧版 conhost 只能用键盘）
 - 已安装 Claude Code CLI，`claude` 命令在 PATH 中
 
-## 快速开始
+## 安装
 
 ```powershell
-git clone https://github.com/qinyun233/ai-agent-seesion-manager.git
-cd ai-agent-seesion-manager
+npm install -g ai-agent-session-manager
+```
+
+安装后运行 `agent-sm` 启动。
+
+也可以从源码运行：
+
+```powershell
+git clone https://github.com/qinyun233/ai-agent-session-manager.git
+cd ai-agent-session-manager
 npm start
 ```
 

@@ -1,6 +1,6 @@
-# ClaudeSessionManager
+# ai-agent-session-manager
 
-读取 Claude Code 的会话记录，用交互列表选择并 `--resume` 继续。纯 Node，无第三方依赖。
+读取 Claude Code 的会话记录，用交互列表选择并 `--resume` 继续。纯 Node，无第三方依赖。npm 包名 `ai-agent-session-manager`，命令别名 `agent-sm`。
 
 ## 运行
 

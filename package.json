@@ -1,14 +1,38 @@
 {
-  "name": "ai-agent-seesion-manager",
+  "name": "ai-agent-session-manager",
   "version": "0.1.0",
-  "private": true,
-  "type": "module",
   "description": "Node.js TUI for managing AI agent sessions (Claude Code on Windows)",
+  "type": "module",
   "bin": {
     "agent-sm": "src/index.js"
+  },
+  "files": [
+    "src",
+    "config.json",
+    "pic"
+  ],
+  "engines": {
+    "node": ">=18"
   },
   "scripts": {
     "start": "node src/index.js",
     "list": "node src/index.js --list"
+  },
+  "keywords": [
+    "claude-code",
+    "tui",
+    "session",
+    "agent",
+    "cli"
+  ],
+  "author": "qinyun233 <1565604772@qq.com>",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/qinyun233/ai-agent-session-manager.git"
+  },
+  "homepage": "https://github.com/qinyun233/ai-agent-session-manager#readme",
+  "bugs": {
+    "url": "https://github.com/qinyun233/ai-agent-session-manager/issues"
   }
 }
