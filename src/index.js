@@ -3,9 +3,12 @@ import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { spawn } from 'node:child_process';
+import { spawn, execFile } from 'node:child_process';
 import { StringDecoder } from 'node:string_decoder';
 import { fileURLToPath } from 'node:url';
+import { promisify } from 'node:util';
+
+const execFileAsync = promisify(execFile);
 
 const ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 
@@ -157,26 +160,57 @@ function isPidAlive(pid) {
   }
 }
 
+function isClaudeProcess(name) {
+  return typeof name === 'string' && name.toLowerCase().includes('claude');
+}
+
+// tasklist 一次拿到所有进程名，用于确认 PID 确实是 claude 进程（防 PID 复用）
+async function getProcessNames() {
+  if (process.platform !== 'win32') return null;
+  try {
+    const { stdout } = await execFileAsync('tasklist', ['/FO', 'CSV', '/NH'], {
+      windowsHide: true,
+      maxBuffer: 8 * 1024 * 1024,
+      encoding: 'utf8',
+    });
+    const map = new Map();
+    for (const line of stdout.split(/\r?\n/)) {
+      const m = line.match(/^"([^"]*)","(\d+)"/);
+      if (m) map.set(Number(m[2]), m[1].toLowerCase());
+    }
+    return map;
+  } catch {
+    return null;
+  }
+}
+
 async function readAliveSessionIds(sessionsDir) {
   const ids = new Set();
-  let names;
+  let files;
   try {
-    names = await fsp.readdir(sessionsDir);
+    files = (await fsp.readdir(sessionsDir)).filter((n) => n.endsWith('.json'));
   } catch {
     return ids;
   }
-  await Promise.all(
-    names.filter((n) => n.endsWith('.json')).map(async (n) => {
+  if (!files.length) return ids;
+
+  const [states, procNames] = await Promise.all([
+    Promise.all(files.map(async (n) => {
       try {
-        const data = JSON.parse(await fsp.readFile(path.join(sessionsDir, n), 'utf8'));
-        if (data && typeof data.pid === 'number' && data.sessionId && isPidAlive(data.pid)) {
-          ids.add(String(data.sessionId).toLowerCase());
-        }
+        return JSON.parse(await fsp.readFile(path.join(sessionsDir, n), 'utf8'));
       } catch {
-        // 单个状态文件损坏就跳过
+        return null; // 单个状态文件损坏就跳过
       }
-    }),
-  );
+    })),
+    getProcessNames(),
+  ]);
+
+  for (const data of states) {
+    if (!data || typeof data.pid !== 'number' || !data.sessionId) continue;
+    if (!isPidAlive(data.pid)) continue;
+    if (procNames && !isClaudeProcess(procNames.get(data.pid))) continue;
+    ids.add(String(data.sessionId).toLowerCase());
+  }
   return ids;
 }
 

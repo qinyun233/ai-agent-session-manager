@@ -36,7 +36,7 @@ node src/index.js --sort time --order asc
 ## 实现要点
 
 - 一个 `<uuid>.jsonl` 即一个会话，文件名就是会话 id。
-- 存活判断：读 `sessionsDir` 下的 `<pid>.json`，用 `process.kill(pid, 0)` 检查进程是否存在。PID 被系统复用时可能误判为存活，属已知局限。
+- 存活判断：读 `sessionsDir` 下的 `<pid>.json`，先用 `process.kill(pid, 0)` 确认 PID 存在，再用 `tasklist` 确认该 PID 的进程名包含 `claude`（防止 PID 被复用时误判）；非 Windows 或 `tasklist` 失败时退化为只查 PID。
 - 项目文件夹名是有损编码，`:` `\` `_` `-` 和中文都变成 `-`，不能反推真实路径；因此只读 jsonl 的第一个 `cwd` 字段，找到即停止，不读标题和正文。
 - 界面是自己用 ANSI 转义序列画的（`src/index.js` 的 `runTui`），没有用 inquirer 等库，因为那些库不支持鼠标点击。
 - 会话结束后会重新扫描并回到列表。
