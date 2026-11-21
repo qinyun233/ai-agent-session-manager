@@ -5,7 +5,7 @@
   "type": "module",
   "description": "Node.js TUI for managing AI agent sessions (Claude Code on Windows)",
   "bin": {
-    "claude-sessions": "src/index.js"
+    "agent-sm": "src/index.js"
   },
   "scripts": {
     "start": "node src/index.js",
