@@ -437,11 +437,19 @@ function sessionCell(s, key) {
   }
 }
 
-function colorTime(text, ms) {
+const RESET_FG = '\x1b[22;39m';
+const SELECTED_BG = '\x1b[48;5;240m';
+
+// 只复位前景色/亮度，保留选中行背景色
+function fg(code, text) {
+  return `\x1b[${code}m${text}${RESET_FG}`;
+}
+
+function timeColor(ms) {
   const age = Date.now() - ms;
-  if (age < 3_600_000) return `\x1b[32m${text}\x1b[0m`;
-  if (age < 86_400_000) return `\x1b[33m${text}\x1b[0m`;
-  return dim(text);
+  if (age < 3_600_000) return 32;
+  if (age < 86_400_000) return 33;
+  return 2;
 }
 
 function renderHeader(cells, sort) {
@@ -460,19 +468,16 @@ function renderRow(cells, s, selected, width) {
     if (c.key === 'name') {
       const label = truncate(raw, Math.max(1, c.width - 2));
       const pad = ' '.repeat(Math.max(0, c.width - strWidth(label) - 2));
-      if (selected) return `${label} ●${pad}`;
-      const dot = s.alive ? '\x1b[32m●\x1b[0m' : '\x1b[31m●\x1b[0m';
-      return `\x1b[36m${label}\x1b[0m ${dot}${pad}`;
+      return fg(36, label) + ' ' + fg(s.alive ? 32 : 31, '●') + pad;
     }
     const shown = truncate(raw, c.width);
     const pad = ' '.repeat(Math.max(0, c.width - strWidth(shown)));
-    if (selected) return shown + pad;
-    if (c.key === 'time') return colorTime(shown, s.mtimeMs) + pad;
-    return dim(shown) + pad;
+    if (c.key === 'time') return fg(timeColor(s.mtimeMs), shown) + pad;
+    return fg(2, shown) + pad;
   });
   const used = LEFT + cells.reduce((n, c) => n + c.width, 0) + GAP * (cells.length - 1);
   const line = ' '.repeat(LEFT) + parts.join(' '.repeat(GAP)) + ' '.repeat(Math.max(0, width - used));
-  return selected ? `\x1b[7m${line}\x1b[0m` : line;
+  return selected ? SELECTED_BG + line + '\x1b[0m' : line;
 }
 
 function runTui(cfg, initialSessions, initialSort) {
