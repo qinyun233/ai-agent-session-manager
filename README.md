@@ -2,7 +2,7 @@
 
 列出本机所有 Claude Code 会话，选一个直接 `claude --resume` 继续。纯 Node 实现，无第三方依赖。
 
-![界面预览](docs/preview.svg)
+![界面预览](pic/效果.jpg)
 
 ## 环境
 
