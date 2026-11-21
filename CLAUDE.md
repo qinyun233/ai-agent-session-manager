@@ -40,7 +40,9 @@ node src/index.js --sort time --order asc
 - 项目文件夹名是有损编码，`:` `\` `_` `-` 和中文都变成 `-`，不能反推真实路径；因此只读 jsonl 的第一个 `cwd` 字段，找到即停止，不读标题和正文。
 - 界面是自己用 ANSI 转义序列画的（`src/index.js` 的 `runTui`），没有用 inquirer 等库，因为那些库不支持鼠标点击。
 - 终端能力检测在 `detectCapabilities`：stdin/stdout 都是 TTY 才进交互界面；Windows 上默认认为支持 ANSI；鼠标只按环境变量启发式判断（WT_SESSION、TERM_PROGRAM、ConEmuANSI、TERM 等），可用 `--mouse` / `--no-mouse` 覆盖。
-- `isTTY` 为假时直接输出纯文本列表；`--plain` 或 `TERM=dumb` 时走 `runPlain` 逐行交互，不进入备用屏、不启用原始模式和鼠标。
+- `isTTY` 为假时直接输出纯文本列表；`--plain`、非现代终端或窗口小于 60x10 时走 `runPlain`：列表只打印一次，底部状态行用 `\r` 覆盖更新，支持方向键/Enter/Tab，不使用备用屏、光标定位和鼠标。
+- 老式 Windows 控制台（非 Windows Terminal 等）默认降级到 `runPlain`；`--tui` 可强制全屏。
+- `runPlain` 启动时发送 DSR（`\x1b[6n`）探测光标定位能力：有应答则用 10 行窗口原地重绘（`\x1b[NA` + `\x1b[2K`），无应答则输出完整列表，只更新底部状态行。两套路径共用同一套按键处理。
 - `NO_COLOR` 只关颜色，TUI 仍在；此时选中行用行首 `>` 标记。
 - 老式 Windows 控制台（非 Windows Terminal）的方向键等按键不是 ANSI 序列，而是 `\x00` / `\xe0` + 扫描码（H/P/K/M 等）；`\xe0` 会被 UTF-8 解码成替换字符 ``，解析时要一并识别。
 - 会话结束后会重新扫描并回到列表。

@@ -9,7 +9,7 @@
 ## 环境
 
 - Node.js 18 及以上
-- Windows 10/11 + Windows Terminal（鼠标点击需要终端支持 SGR 鼠标协议，旧版 conhost 只能用键盘）
+- Windows 10/11，推荐使用 Windows Terminal（其他终端见「终端兼容」）
 - 已安装 Claude Code CLI，`claude` 命令在 PATH 中
 
 ## 安装
@@ -40,12 +40,32 @@ npm start
 
 ## 终端兼容
 
-启动时自动检测终端能力：
+启动时自动判断，用哪种界面不需要手动选：
 
-- **完整 TUI**：支持 ANSI 的终端（Windows Terminal、VS Code、WezTerm 等）进入全屏界面；只有支持 SGR 鼠标协议的终端才启用点击/滚轮
-- **逐行模式**：加 `--plain`，或终端不支持 ANSI（如 `TERM=dumb`）时自动启用。直接打印带编号的列表，输入编号打开会话、输入关键字过滤、`:sort name` 改排序、`:all` 清空过滤、`q` 退出
-- **非交互环境**：通过管道/重定向运行时直接输出列表并退出，可用 `--open <id前缀>` 恢复指定会话
-- 设置 `NO_COLOR` 环境变量可关闭颜色（仍保留 TUI）
+- **全屏界面**：Windows Terminal、VS Code 终端、WezTerm、ConEmu、Git Bash（mintty）等现代终端。窗口宽度至少 60 列
+- **逐行模式**：Windows 自带的 PowerShell / cmd 经典窗口。只显示 10 行列表，用 ↑↓ 滚动，Enter 打开当前会话，操作提示在最后一行
+
+## 命令
+
+### 常用
+
+| 命令 | 说明 |
+| --- | --- |
+| `agent-sm` | 启动交互界面，自动选择全屏或逐行模式 |
+| `agent-sm --plain` | 强制逐行模式：10 行窗口、↑↓ 滚动，适合任何 PowerShell / cmd 窗口 |
+| `agent-sm --tui` | 强制全屏界面，老式控制台可能显示异常 |
+
+### more
+
+| 命令 | 说明 |
+| --- | --- |
+| `agent-sm --list` | 输出纯文本列表后退出 |
+| `agent-sm --json` | 输出 JSON 后退出 |
+| `agent-sm --open <id前缀>` | 直接恢复指定会话 |
+| `agent-sm --sort time\|name\|path\|id` | 指定初始排序 |
+| `agent-sm --order asc\|desc` | 指定排序方向 |
+| `agent-sm --no-mouse` | 关闭鼠标支持 |
+| `agent-sm --config <path>` | 指定配置文件 |
 
 ## 配置
 

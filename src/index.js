@@ -7,7 +7,6 @@ import { spawn, execFile } from 'node:child_process';
 import { StringDecoder } from 'node:string_decoder';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
-import { createInterface } from 'node:readline/promises';
 
 const execFileAsync = promisify(execFile);
 
@@ -33,13 +32,14 @@ const GAP = 2;
 const LIST_START = 4;
 
 function parseArgs(argv) {
-  const args = { list: false, json: false, help: false, config: null, open: null, sort: null, order: null, plain: false, mouse: null };
+  const args = { list: false, json: false, help: false, config: null, open: null, sort: null, order: null, plain: false, tui: false, mouse: null };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === '--list') args.list = true;
     else if (a === '--json') args.json = true;
     else if (a === '--help' || a === '-h') args.help = true;
     else if (a === '--plain') args.plain = true;
+    else if (a === '--tui') args.tui = true;
     else if (a === '--mouse') args.mouse = true;
     else if (a === '--no-mouse') args.mouse = false;
     else if (a === '--sort') args.sort = argv[++i] ?? null;
@@ -394,19 +394,27 @@ function detectCapabilities(args) {
   const env = process.env;
   const tty = Boolean(process.stdin.isTTY && process.stdout.isTTY);
   const term = String(env.TERM || '');
-  let ansi = tty && term !== 'dumb';
-  if (process.platform === 'win32' && tty) ansi = true;
-  const color = ansi && !env.NO_COLOR;
 
+  // 现代终端：Windows Terminal、VS Code、WezTerm、ConEmu、Git Bash/mintty 等
+  const modern = Boolean(env.WT_SESSION)
+    || env.TERM_PROGRAM === 'vscode'
+    || env.TERM_PROGRAM === 'WezTerm'
+    || env.TERM_PROGRAM === 'Apple_Terminal'
+    || env.ConEmuANSI === 'ON'
+    || Boolean(env.ANSICON)
+    || Boolean(term);
+
+  // 老式 Windows 控制台对备用屏/256 色/宽字符支持不一致，默认不用全屏界面
+  const ansi = tty && term !== 'dumb' && (process.platform === 'win32' ? modern || args.tui : true);
+
+  const color = ansi && !env.NO_COLOR;
   let mouse = false;
   if (tty) {
     if (process.platform === 'win32') {
-      mouse = Boolean(env.WT_SESSION)
-        || env.TERM_PROGRAM === 'vscode'
-        || env.TERM_PROGRAM === 'WezTerm'
+      mouse = modern && /xterm|256color|vscode|wezterm/i.test(`${term} ${env.TERM_PROGRAM ?? ''}`)
+        || Boolean(env.WT_SESSION)
         || env.ConEmuANSI === 'ON'
-        || Boolean(env.ANSICON)
-        || /xterm|256color/i.test(term);
+        || Boolean(env.ANSICON);
     } else {
       mouse = /xterm|screen|tmux|rxvt|alacritty|kitty|wezterm/i.test(term) || Boolean(env.TERM_PROGRAM);
     }
@@ -415,71 +423,387 @@ function detectCapabilities(args) {
   return { tty, ansi, color, mouse };
 }
 
-function printInteractiveList(rows, sort, caps) {
-  const dot = (alive) => {
-    if (!caps.color) return alive ? '*' : '-';
-    return alive ? '\x1b[32m●\x1b[0m' : '\x1b[31m●\x1b[0m';
-  };
-  console.log(`\n${'-'.repeat(60)} 排序: ${sortLabel(sort)}  共 ${rows.length} 条`);
-  if (!rows.length) {
-    console.log('  (无匹配会话)');
-    return;
-  }
-  rows.forEach((s, i) => {
-    console.log(`${String(i + 1).padStart(3)}. ${dot(s.alive)} ${s.projectName}  ${s.cwd ?? '(cwd 未知)'}  ${relTime(s.mtimeMs)}  ${s.id.slice(0, 8)}`);
+// 普通终端回退：不使用全屏/备用屏/光标定位，只靠回车覆盖底部状态行
+// 探测终端是否支持光标定位（DSR 应答）；不支持就只能用整表输出
+function probeCursorOps() {
+  if (!process.stdin.isTTY) return Promise.resolve(false);
+  return new Promise((resolve) => {
+    let buf = '';
+    let settled = false;
+    let timer = null;
+    const finish = (value) => {
+      if (settled) return;
+      settled = true;
+      if (timer) clearTimeout(timer);
+      process.stdin.removeListener('data', onData);
+      resolve(value);
+    };
+    const onData = (chunk) => {
+      buf += chunk.toString('utf8');
+      if (/\x1b\[\d+;\d+R/.test(buf)) finish(true);
+    };
+    try {
+      process.stdin.setRawMode(true);
+    } catch {
+      finish(false);
+      return;
+    }
+    process.stdin.resume();
+    process.stdin.on('data', onData);
+    timer = setTimeout(() => finish(false), 300);
+    process.stdout.write('\x1b[6n');
   });
 }
 
-// 普通终端回退：逐行交互，不需要全屏、原始模式和鼠标
-async function runPlain(cfg, initialSessions, initialSort, caps) {
-  const rl = createInterface({ input: process.stdin, output: process.stdout });
+async function runPlain(cfg, initialSessions, initialSort) {
   let sessions = initialSessions;
   let sort = initialSort;
+  let sorted = sortSessions(sessions, sort);
   let query = '';
+  let rows = filterSessions(sorted, query);
+  let cursor = 0;
+  let top = 0;
+  let renderedLines = 0;
+  let typed = '';
+  let statusLen = 0;
+  let ended = false;
+  let busy = false;
+  let escTimer = null;
+  const decoder = new StringDecoder('utf8');
+  let pending = '';
+  const inPlace = await probeCursorOps();
+  const VIEW = 10;
 
-  while (true) {
-    const rows = filterSessions(sortSessions(sessions, sort), query);
-    printInteractiveList(rows, sort, caps);
-    let answer;
-    try {
-      answer = await rl.question(`[${sortLabel(sort)}] 编号打开 / 关键字过滤 / :sort time|name|path|id / :all 清空 / q 退出 > `);
-    } catch {
-      break;
+  return new Promise((resolve) => {
+    const widthOf = () => Math.max(30, process.stdout.columns || 80);
+    const write = (s) => process.stdout.write(s);
+
+    function truncateAscii(s, width) {
+      let w = 0;
+      let out = '';
+      for (const ch of s) {
+        const cw = isWide(ch.codePointAt(0)) ? 2 : 1;
+        if (w + cw > width - 2) return out + '..';
+        w += cw;
+        out += ch;
+      }
+      return s;
     }
-    const text = String(answer ?? '').trim();
-    if (!text) continue;
-    if (text === 'q' || text === 'quit' || text === 'exit') break;
-    if (text === ':all') {
-      query = '';
-      continue;
+
+    function clearStatus() {
+      if (statusLen) write('\r' + ' '.repeat(statusLen) + '\r');
+      statusLen = 0;
     }
-    if (text.startsWith(':sort')) {
+
+    function ensureVisible() {
+      if (!inPlace) return;
+      if (cursor < top) top = cursor;
+      if (cursor >= top + VIEW) top = cursor - VIEW + 1;
+    }
+
+    function viewLines() {
+      const width = widthOf() - 1;
+      const lines = [truncateAscii(`------ 排序: ${sortLabel(sort)}  ${rows.length ? cursor + 1 : 0}/${rows.length} ------`, width)];
+      for (let i = 0; i < VIEW; i++) {
+        const idx = top + i;
+        if (idx >= rows.length) {
+          lines.push('');
+          continue;
+        }
+        const s = rows[idx];
+        lines.push(truncateAscii(`${idx === cursor ? '>' : ' '}${String(idx + 1).padStart(3)}. ${s.alive ? '*' : '-'} ${s.projectName}  ${s.cwd ?? '(cwd 未知)'}  ${relTime(s.mtimeMs)}`, width));
+      }
+      lines.push(truncateAscii(`输入: ${typed || '-'}  Up/Down Enter Tab Esc`, width));
+      return lines;
+    }
+
+    function redraw() {
+      const lines = viewLines();
+      if (renderedLines) write(`\x1b[${renderedLines - 1}A`);
+      write('\r');
+      lines.forEach((line, i) => {
+        write('\x1b[2K' + line);
+        if (i < lines.length - 1) write('\r\n');
+      });
+      renderedLines = lines.length;
+      statusLen = 0;
+    }
+
+    function showStatus() {
+      if (inPlace) {
+        redraw();
+        return;
+      }
+      const width = widthOf();
+      const cur = rows[cursor];
+      const label = cur ? `${cursor + 1}. ${cur.projectName}` : '无匹配';
+      const typedPart = typed ? `  输入: ${typed}` : '';
+      const text = `> ${label} (${rows.length ? cursor + 1 : 0}/${rows.length})${typedPart}  Up/Down Enter Tab Esc`;
+      const line = truncateAscii(text, width - 1);
+      const pad = ' '.repeat(Math.max(0, statusLen - strWidth(line)));
+      write('\r' + line + pad);
+      statusLen = Math.max(statusLen, strWidth(line));
+    }
+
+    function printList() {
+      if (inPlace) {
+        renderedLines = 0;
+        write('\n');
+        redraw();
+        return;
+      }
+      clearStatus();
+      write(`------ 排序: ${sortLabel(sort)}  共 ${rows.length} 条 ------\n`);
+      if (!rows.length) write('(无匹配会话)\n');
+      rows.forEach((s, i) => {
+        const line = `${i === cursor ? '>' : ' '}${String(i + 1).padStart(3)}. ${s.alive ? '*' : '-'} ${s.projectName}  ${s.cwd ?? '(cwd 未知)'}  ${relTime(s.mtimeMs)}  ${s.id.slice(0, 8)}`;
+        write(truncateAscii(line, widthOf()) + '\n');
+      });
+      showStatus();
+    }
+
+    function resort() {
+      sorted = sortSessions(sessions, sort);
+      rows = filterSessions(sorted, query);
+      cursor = 0;
+      top = 0;
+      typed = '';
+      if (inPlace) redraw();
+      else printList();
+    }
+
+    function move(delta) {
+      if (!rows.length) return;
+      cursor = Math.max(0, Math.min(rows.length - 1, cursor + delta));
+      ensureVisible();
+      showStatus();
+    }
+
+    function syncTypedIndex() {
+      if (/^\d+$/.test(typed)) {
+        const n = Number(typed);
+        if (n >= 1 && n <= rows.length) {
+          cursor = n - 1;
+          ensureVisible();
+        }
+      }
+    }
+
+    function handleKey(key) {
+      if (ended || busy) return;
+      switch (key) {
+        case 'up': move(-1); break;
+        case 'down': move(1); break;
+        case 'pageup': move(-10); break;
+        case 'pagedown': move(10); break;
+        case 'home': cursor = 0; ensureVisible(); showStatus(); break;
+        case 'end': cursor = Math.max(0, rows.length - 1); ensureVisible(); showStatus(); break;
+        case 'enter': {
+          if (typed && !/^\d+$/.test(typed)) {
+            query = typed;
+            typed = '';
+            rows = filterSessions(sorted, query);
+            cursor = 0;
+            top = 0;
+            if (inPlace) redraw();
+            else printList();
+            break;
+          }
+          const idx = typed ? Number(typed) - 1 : cursor;
+          typed = '';
+          if (idx >= 0 && idx < rows.length) open(rows[idx]);
+          else showStatus();
+          break;
+        }
+        case 'escape':
+          if (typed) {
+            typed = '';
+            showStatus();
+          } else {
+            quit();
+          }
+          break;
+        case 'tab':
+          sort = normalizeSort(SORT_MODES[(SORT_MODES.indexOf(sort.mode) + 1) % SORT_MODES.length]);
+          resort();
+          break;
+        case 'ctrl-r':
+          sort = { mode: sort.mode, order: sort.order === 'asc' ? 'desc' : 'asc' };
+          resort();
+          break;
+        case 'clear':
+          if (typed) {
+            typed = '';
+            showStatus();
+          }
+          break;
+        case 'backspace':
+          if (typed) {
+            typed = [...typed].slice(0, -1).join('');
+            syncTypedIndex();
+            showStatus();
+          }
+          break;
+        case 'left': case 'right': case 'other': break;
+        default:
+          if (key.length === 1 && key.codePointAt(0) >= 32) {
+            typed += key;
+            syncTypedIndex();
+            showStatus();
+          }
+      }
+    }
+
+    function quit() {
+      if (ended) return;
+      ended = true;
+      if (escTimer) clearTimeout(escTimer);
+      if (inPlace) {
+        write('\n');
+        renderedLines = 0;
+      } else {
+        clearStatus();
+        write('\n');
+      }
+      detach();
+      resolve();
+    }
+
+    function attach() {
+      process.stdin.setRawMode(true);
+      process.stdin.resume();
+      process.stdin.on('data', onData);
+    }
+
+    function detach() {
+      process.stdin.removeListener('data', onData);
       try {
-        sort = normalizeSort(text.split(/\s+/)[1]);
-        query = '';
-      } catch (err) {
-        console.log(err.message);
+        process.stdin.setRawMode(false);
+      } catch {
+        // 流已关闭时忽略
       }
-      continue;
+      process.stdin.pause();
     }
-    if (/^\d+$/.test(text)) {
-      const idx = Number(text) - 1;
-      if (idx < 0 || idx >= rows.length) {
-        console.log('编号超出范围');
-        continue;
+
+    async function open(session) {
+      if (busy || !session) return;
+      busy = true;
+      detach();
+      if (inPlace) {
+        write('\n');
+        renderedLines = 0;
+      } else {
+        clearStatus();
+        write('\n');
       }
-      await launch(cfg, rows[idx]);
+      await launch(cfg, session);
       try {
         sessions = await scanSessions(cfg.projectsDir);
         await applyAliveStatus(sessions, cfg.sessionsDir);
       } catch (err) {
         console.error(err.message ?? err);
       }
-      continue;
+      sorted = sortSessions(sessions, sort);
+      rows = filterSessions(sorted, query);
+      cursor = Math.min(cursor, Math.max(0, rows.length - 1));
+      typed = '';
+      attach();
+      printList();
+      busy = false;
     }
-    query = text;
-  }
-  rl.close();
+
+    function onData(chunk) {
+      pending += decoder.write(chunk);
+      pump();
+    }
+
+    function pump() {
+      while (pending.length) {
+        const ch = pending[0];
+        if (ch === '\x1b') {
+          const arrow = pending.match(/^\x1b\[(A|B|C|D|H|F)/);
+          if (arrow) {
+            pending = pending.slice(arrow[0].length);
+            handleKey({ A: 'up', B: 'down', C: 'right', D: 'left', H: 'home', F: 'end' }[arrow[1]]);
+            continue;
+          }
+          const tilde = pending.match(/^\x1b\[(\d+)~/);
+          if (tilde) {
+            pending = pending.slice(tilde[0].length);
+            handleKey({ 5: 'pageup', 6: 'pagedown' }[tilde[1]] ?? 'other');
+            continue;
+          }
+          const csi = pending.match(/^\x1b\[[0-9;?]*[A-Za-z]/);
+          if (csi) {
+            pending = pending.slice(csi[0].length);
+            continue;
+          }
+          if (pending.length === 1) {
+            if (!escTimer) {
+              escTimer = setTimeout(() => {
+                escTimer = null;
+                if (pending === '\x1b') {
+                  pending = '';
+                  handleKey('escape');
+                } else {
+                  pump();
+                }
+              }, 40);
+            }
+            return;
+          }
+          pending = pending.slice(1);
+          continue;
+        }
+        if (ch === '\x00' || ch.codePointAt(0) === 0xfffd) {
+          if (pending.length < 2) return;
+          const code = pending[1];
+          pending = pending.slice(2);
+          handleKey({
+            H: 'up', P: 'down', K: 'left', M: 'right',
+            I: 'pageup', Q: 'pagedown', G: 'home', O: 'end', S: 'delete',
+          }[code] ?? 'other');
+          continue;
+        }
+        if (ch === '\r' || ch === '\n') {
+          pending = pending.slice(1);
+          handleKey('enter');
+          continue;
+        }
+        if (ch === '\x7f' || ch === '\b') {
+          pending = pending.slice(1);
+          handleKey('backspace');
+          continue;
+        }
+        if (ch === '\x03') {
+          pending = pending.slice(1);
+          quit();
+          continue;
+        }
+        if (ch === '\x15') {
+          pending = pending.slice(1);
+          handleKey('clear');
+          continue;
+        }
+        if (ch === '\t') {
+          pending = pending.slice(1);
+          handleKey('tab');
+          continue;
+        }
+        if (ch === '\x12') {
+          pending = pending.slice(1);
+          handleKey('ctrl-r');
+          continue;
+        }
+        const cp = String.fromCodePoint(pending.codePointAt(0));
+        pending = pending.slice(cp.length);
+        handleKey(cp);
+      }
+    }
+
+    printList();
+    attach();
+  });
 }
 
 function printHelp() {
@@ -492,6 +816,7 @@ function printHelp() {
   --sort <mode>      排序方式: time | name | path | id（默认 time）
   --order <dir>      排序方向: asc | desc（time 默认 desc，其余 asc）
   --plain            强制使用逐行交互模式（不支持全屏的终端）
+  --tui              强制使用全屏界面（老式控制台默认会降级）
   --mouse            强制启用鼠标支持
   --no-mouse         强制关闭鼠标支持
   --config <path>    指定配置文件（默认 ./config.json）
@@ -513,9 +838,11 @@ function printHelp() {
   Esc          退出
 
 终端适配:
-  自动检测终端是否支持 ANSI 和鼠标；不支持 ANSI 或加了 --plain 时
-  自动改用逐行交互模式，普通 cmd/PowerShell 也能使用。
-  非交互环境（管道）会直接输出列表。
+  非 Windows Terminal / VS Code / WezTerm / ConEmu / Git Bash 等现代终端，
+  或窗口小于 60x10、加了 --plain 时，自动改用逐行交互模式。
+  逐行模式：↑↓ 移动（底部状态行显示当前项）、PgUp/PgDn 翻页、Enter 打开、
+  Tab 切换排序、Ctrl+R 正逆序、Esc 退出；也可输入编号或关键字后回车。
+  非交互环境（管道）会直接输出列表。加 --tui 可强制全屏界面。
 
 环境变量:
   CLAUDE_SESSION_MANAGER_CONFIG  配置文件的替代路径`);
@@ -860,8 +1187,12 @@ function runTui(cfg, initialSessions, initialSort, caps) {
 
     function render() {
       if (ended) return;
-      const width = Math.max(70, process.stdout.columns || 100);
+      const width = process.stdout.columns || 100;
       const height = Math.max(8, process.stdout.rows || 30);
+      if (width < 60) {
+        process.stdout.write(`\x1b[H\x1b[J终端宽度 ${width} 列，全屏界面至少需要 60 列。请放大窗口，或按 Esc 退出后使用 --plain。\x1b[K`);
+        return;
+      }
       layout = computeLayout(width);
       viewH = Math.max(1, height - 5);
 
@@ -966,7 +1297,14 @@ async function main() {
     console.log('\n当前不是交互终端，已输出列表。恢复会话请用: node src/index.js --open <会话id前缀>');
     return;
   }
-  if (args.plain || !caps.ansi) {
+  const cols = process.stdout.columns || 100;
+  const rows = process.stdout.rows || 30;
+  const tooSmall = cols < 60 || rows < 10;
+  if (args.plain || !caps.ansi || tooSmall) {
+    if (!args.plain) {
+      if (!caps.ansi) console.log('当前终端不是 Windows Terminal 等现代终端，已切换到逐行模式（↑↓ 选择，Enter 打开；加 --tui 可强制全屏）。');
+      else if (tooSmall) console.log(`终端尺寸 ${cols}x${rows} 太小，已切换到逐行模式（↑↓ 选择，Enter 打开）。`);
+    }
     await runPlain(cfg, sessions, initialSort, caps);
     return;
   }
