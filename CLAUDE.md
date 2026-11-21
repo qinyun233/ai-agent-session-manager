@@ -42,5 +42,6 @@ node src/index.js --sort time --order asc
 - 终端能力检测在 `detectCapabilities`：stdin/stdout 都是 TTY 才进交互界面；Windows 上默认认为支持 ANSI；鼠标只按环境变量启发式判断（WT_SESSION、TERM_PROGRAM、ConEmuANSI、TERM 等），可用 `--mouse` / `--no-mouse` 覆盖。
 - `isTTY` 为假时直接输出纯文本列表；`--plain` 或 `TERM=dumb` 时走 `runPlain` 逐行交互，不进入备用屏、不启用原始模式和鼠标。
 - `NO_COLOR` 只关颜色，TUI 仍在；此时选中行用行首 `>` 标记。
+- 老式 Windows 控制台（非 Windows Terminal）的方向键等按键不是 ANSI 序列，而是 `\x00` / `\xe0` + 扫描码（H/P/K/M 等）；`\xe0` 会被 UTF-8 解码成替换字符 ``，解析时要一并识别。
 - 会话结束后会重新扫描并回到列表。
 - `--list` / `--json` / `--open` 不进入交互界面，可用于脚本或管道。

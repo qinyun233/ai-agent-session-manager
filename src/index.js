@@ -711,6 +711,18 @@ function runTui(cfg, initialSessions, initialSort, caps) {
           pending = pending.slice(1);
           continue;
         }
+        // 老式 Windows 控制台的按键是 \x00 / \xe0 + 扫描码，不是 ANSI 序列
+        // 0xE0 不是合法 UTF-8，解码后会变成替换字符，这里一并识别
+        if (ch === '\x00' || ch === '\xe0' || ch === '�') {
+          if (pending.length < 2) return;
+          const code = pending[1];
+          pending = pending.slice(2);
+          handleKey({
+            H: 'up', P: 'down', K: 'left', M: 'right',
+            I: 'pageup', Q: 'pagedown', G: 'home', O: 'end', S: 'delete',
+          }[code] ?? 'other');
+          continue;
+        }
         if (ch === '\r' || ch === '\n') {
           pending = pending.slice(1);
           handleKey('enter');
